@@ -2,16 +2,43 @@ name: Build and publish font packs
 on:
   push:
     branches: [main]
-    tags: ['fonts-v*']
+    paths:
+      - 'tools/**'
+      - '.github/workflows/fonts.yml'
   workflow_dispatch:
 permissions:
   contents: read
+concurrency:
+  group: font-release-main
+  cancel-in-progress: false
 jobs:
   build:
     runs-on: ubuntu-24.04
     timeout-minutes: 180
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Choose next font release version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="$(python3 - <<'PY'
+          import re, subprocess
+          tags = subprocess.check_output(["git", "tag", "--list", "fonts-v*"], text=True).splitlines()
+          versions = [tuple(map(int, m.groups())) for t in tags if (m := re.fullmatch(r"fonts-v(\d+)\.(\d+)\.(\d+)", t))]
+          if versions:
+              major, minor, patch = max(versions)
+              print(f"fonts-v{major}.{minor}.{patch+1}")
+          else:
+              print("fonts-v1.0.0")
+          PY
+          )"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
       - name: Install font generation dependencies
         run: |
           sudo apt-get update
@@ -24,17 +51,21 @@ jobs:
           .venv/bin/python tools/build_q2_small_font_assets.py build/fonts
           (cd build/fonts && sha256sum -c books-fonts-8-14.sha256)
       - name: Package individual families
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
         run: |
-          tag=fonts-v1.0.0
-          if [[ "$GITHUB_REF_TYPE" == tag ]]; then tag="$GITHUB_REF_NAME"; fi
-          .venv/bin/python tools/package_fonts.py build/fonts dist "$tag"
+          set -euo pipefail
+          .venv/bin/python tools/package_fonts.py build/fonts dist "$TAG"
+          test -s dist/catalog.json
+          test -s dist/catalog.tsv
+          (cd dist && sha256sum -c *.zip.sha256)
       - uses: actions/upload-artifact@v4
         with:
           name: q2-books-font-packs
           path: dist/
           if-no-files-found: error
   publish:
-    if: startsWith(github.ref, 'refs/tags/fonts-v')
+    if: github.ref == 'refs/heads/main'
     needs: build
     runs-on: ubuntu-24.04
     permissions:
@@ -48,4 +79,18 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --title "Q2 Books fonts $GITHUB_REF_NAME" --notes "Independent 8–14 pt font packs and catalog. Extract a pack into .books/fonts/ on the SD card."
+          TAG: ${{ needs.build.outputs.tag }}
+          SOURCE_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s dist/catalog.tsv && test -s dist/catalog.json
+          (cd dist && sha256sum -c *.zip.sha256)
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::error::Release already exists; refusing to overwrite"
+            exit 1
+          fi
+          gh release create "$TAG" --target "$SOURCE_SHA" --draft --title "Q2 Books fonts $TAG" --notes "Independent 8–14 pt font packs and catalog. Extract a pack into .books/fonts/ on the SD card."
+          gh release upload "$TAG" dist/*
+          gh release edit "$TAG" --draft=false --latest
+          echo "Published https://github.com/$GH_REPO/releases/tag/$TAG" >> "$GITHUB_STEP_SUMMARY"
