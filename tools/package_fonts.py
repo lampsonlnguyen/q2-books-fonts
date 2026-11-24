@@ -54,6 +54,15 @@ def main():
                                   "sha256":hashlib.file_digest(f.open("rb"),"sha256").hexdigest()}
                                  for f,n in files]))
     (out / "catalog.json").write_text(json.dumps(dict(schema=1, version=tag, packs=packs), indent=2)+"\n")
+    # A bounded, easy-to-parse companion catalog for the low-memory Q2.
+    lines = ["Q2BOOKS-FONTS1\t" + tag]
+    for pack in packs:
+        lines.append("\t".join(map(str, ["P", pack["id"], pack["name"],
+                                         pack["bytes"], pack["sha256"]])))
+        for file in pack["files"]:
+            lines.append("\t".join(map(str, ["F", pack["id"], file["path"],
+                                             file["bytes"], file["sha256"]])))
+    (out / "catalog.tsv").write_text("\n".join(lines) + "\n", encoding="utf-8")
     print("Pack sizes:", [(p["id"], p["bytes"]) for p in packs])
 
 if __name__ == "__main__":
